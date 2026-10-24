@@ -16,58 +16,68 @@ st.set_page_config(
     layout="wide",
 )
 
+# --------------------------------------------------
+# 2. LOAD MONGODB SETTINGS
+# --------------------------------------------------
 load_dotenv()
 
-MONGODB_URI = os.getenv("MONGODB_URI")
+try:
+    MONGODB_URI = st.secrets["MONGODB_URI"]
+except (KeyError, FileNotFoundError):
+    MONGODB_URI = os.getenv("MONGODB_URI")
+
 DATABASE_NAME = os.getenv("MONGODB_DATABASE", "sales_db")
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "sales")
 
+# Allow database and collection to be configured in Streamlit Secrets.
+try:
+    DATABASE_NAME = st.secrets.get("MONGODB_DATABASE", DATABASE_NAME)
+    COLLECTION_NAME = st.secrets.get("MONGODB_COLLECTION", COLLECTION_NAME)
+except (FileNotFoundError, AttributeError):
+    pass
 
 # --------------------------------------------------
-# 2. SAMPLE SALES DATA
+# 3. SAMPLE DATA (USED IF DATABASE IS UNAVAILABLE)
 # --------------------------------------------------
 SAMPLE_DATA = [
-    {"Date": "2026-01-05", "Product": "Laptop", "Category": "Electronics", "Quantity": 2, "UnitPrice": 2500},
-    {"Date": "2026-01-12", "Product": "Phone", "Category": "Electronics", "Quantity": 5, "UnitPrice": 800},
-    {"Date": "2026-01-20", "Product": "Desk", "Category": "Furniture", "Quantity": 3, "UnitPrice": 300},
-    {"Date": "2026-02-03", "Product": "Chair", "Category": "Furniture", "Quantity": 6, "UnitPrice": 150},
-    {"Date": "2026-02-11", "Product": "Headphones", "Category": "Electronics", "Quantity": 8, "UnitPrice": 100},
-    {"Date": "2026-02-19", "Product": "Notebook", "Category": "Stationery", "Quantity": 10, "UnitPrice": 20},
-    {"Date": "2026-03-02", "Product": "Monitor", "Category": "Electronics", "Quantity": 4, "UnitPrice": 400},
-    {"Date": "2026-03-10", "Product": "Bookshelf", "Category": "Furniture", "Quantity": 2, "UnitPrice": 500},
-    {"Date": "2026-03-18", "Product": "Pen Set", "Category": "Stationery", "Quantity": 12, "UnitPrice": 15},
-    {"Date": "2026-04-04", "Product": "Keyboard", "Category": "Electronics", "Quantity": 5, "UnitPrice": 80},
-    {"Date": "2026-04-13", "Product": "Table", "Category": "Furniture", "Quantity": 2, "UnitPrice": 600},
-    {"Date": "2026-04-22", "Product": "Printer Paper", "Category": "Stationery", "Quantity": 9, "UnitPrice": 25},
+    {"Date": "2026-01-05", "Product": "Laptop", "Category": "Electronics", "Quantity": 2, "UnitPrice": 75000},
+    {"Date": "2026-01-12", "Product": "Mouse", "Category": "Accessories", "Quantity": 5, "UnitPrice": 800},
+    {"Date": "2026-01-20", "Product": "Keyboard", "Category": "Accessories", "Quantity": 3, "UnitPrice": 1500},
+    {"Date": "2026-02-03", "Product": "Phone", "Category": "Electronics", "Quantity": 2, "UnitPrice": 45000},
+    {"Date": "2026-02-10", "Product": "Monitor", "Category": "Electronics", "Quantity": 2, "UnitPrice": 12000},
+    {"Date": "2026-02-18", "Product": "Headphones", "Category": "Accessories", "Quantity": 4, "UnitPrice": 2500},
+    {"Date": "2026-03-02", "Product": "Tablet", "Category": "Electronics", "Quantity": 1, "UnitPrice": 30000},
+    {"Date": "2026-03-09", "Product": "Webcam", "Category": "Accessories", "Quantity": 3, "UnitPrice": 2200},
+    {"Date": "2026-03-17", "Product": "Laptop", "Category": "Electronics", "Quantity": 1, "UnitPrice": 75000},
+    {"Date": "2026-04-04", "Product": "Phone", "Category": "Electronics", "Quantity": 1, "UnitPrice": 45000},
+    {"Date": "2026-04-11", "Product": "Mouse", "Category": "Accessories", "Quantity": 6, "UnitPrice": 800},
+    {"Date": "2026-04-20", "Product": "Monitor", "Category": "Electronics", "Quantity": 1, "UnitPrice": 12000},
 ]
 
-
 # --------------------------------------------------
-# 3. MONGODB CONNECTION AND DATA LOADING
+# 4. CONNECT TO MONGODB ATLAS
 # --------------------------------------------------
 @st.cache_data(ttl=30)
-def load_mongodb_sales(uri, database_name, collection_name):
-    """Return sales documents and a connection error, if any."""
+def load_sales(uri, database_name, collection_name):
     client = None
 
     try:
         client = MongoClient(
             uri,
-            serverSelectionTimeoutMS=7000,
-            connectTimeoutMS=7000,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
         )
 
-        # Test the connection.
+        # Verify the database connection.
         client.admin.command("ping")
 
         collection = client[database_name][collection_name]
-        documents = list(collection.find({}, {"_id": 0}))
+        records = list(collection.find({}, {"_id": 0}))
 
-        return documents, None
+        return records, None
 
-    except Exception as exc:
-        # Return the error so it can be displayed for troubleshooting.
-        return None, str(exc)
+    except Exception as error:
+        return None, str(error)
 
     finally:
         if client is not None:
@@ -75,15 +85,15 @@ def load_mongodb_sales(uri, database_name, collection_name):
 
 
 # --------------------------------------------------
-# 4. DATA CLEANING AND PREPARATION
+# 5. CLEAN AND PREPARE DATA
 # --------------------------------------------------
-def prepare_data(documents):
-    df = pd.DataFrame(documents)
+def prepare_data(records):
+    df = pd.DataFrame(records)
 
     if df.empty:
         return df
 
-    # Recognize common variations in column names.
+    # Support common variations in column names.
     aliases = {
         "date": "Date",
         "salesdate": "Date",
@@ -101,14 +111,15 @@ def prepare_data(documents):
     rename_columns = {}
 
     for column in df.columns:
-        normalized = str(column).strip().replace(" ", "").lower()
-
+        normalized = (
+            str(column).strip().replace(" ", "").lower()
+        )
         if normalized in aliases:
             rename_columns[column] = aliases[normalized]
 
     df = df.rename(columns=rename_columns)
 
-    required_columns = [
+    required = [
         "Date",
         "Product",
         "Category",
@@ -116,112 +127,104 @@ def prepare_data(documents):
         "UnitPrice",
     ]
 
-    missing = [
-        column for column in required_columns
-        if column not in df.columns
-    ]
+    missing = [column for column in required if column not in df.columns]
 
     if missing:
         raise ValueError(
-            "Missing required columns: " + ", ".join(missing)
+            "Required columns missing from MongoDB: "
+            + ", ".join(missing)
         )
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["UnitPrice"] = pd.to_numeric(df["UnitPrice"], errors="coerce")
 
-    df = df.dropna(subset=required_columns).copy()
+    df = df.dropna(subset=required).copy()
 
     df["Product"] = df["Product"].astype(str)
     df["Category"] = df["Category"].astype(str)
+
+    # Calculate revenue for each record.
     df["Revenue"] = df["Quantity"] * df["UnitPrice"]
 
     return df
 
 
 # --------------------------------------------------
-# 5. DASHBOARD HEADER
+# 6. DASHBOARD HEADER
 # --------------------------------------------------
 st.title("📊 Big Data Sales Analysis and Visualization System")
 
 st.markdown(
-    "Analyze sales performance, revenue trends, product performance, "
-    "and category contributions through interactive visualizations."
+    """
+    Explore sales performance, revenue trends, product performance,
+    and category contributions using interactive visualizations.
+    """
 )
 
-
 # --------------------------------------------------
-# 6. LOAD MONGODB DATA OR USE SAMPLE DATA
+# 7. LOAD DATABASE RECORDS
 # --------------------------------------------------
-source = "Sample data"
-connection_error = None
-
-if not MONGODB_URI:
-    raw_data = SAMPLE_DATA
-
-    st.warning(
-        "MongoDB URI was not found. Check that your .env file "
-        "is in the project folder and contains MONGODB_URI."
-    )
-
-else:
-    documents, connection_error = load_mongodb_sales(
+if MONGODB_URI:
+    records, connection_error = load_sales(
         MONGODB_URI,
         DATABASE_NAME,
         COLLECTION_NAME,
     )
 
     if connection_error:
-        raw_data = SAMPLE_DATA
+        st.error("Could not connect to MongoDB Atlas.")
+        st.caption(
+            "Check your Streamlit Secrets, database credentials, "
+            "Atlas network access, and database user permissions."
+        )
+        with st.expander("Technical error details"):
+            st.code(connection_error)
+        st.stop()
 
+    if not records:
         st.warning(
-            "MongoDB connection failed. Showing sample data instead."
+            f"MongoDB is connected, but "
+            f"{DATABASE_NAME}.{COLLECTION_NAME} contains no records."
         )
+        st.stop()
 
-        # Display the connection error, not the URI or password.
-        st.markdown("**MongoDB diagnostic details:**")
-        st.code(connection_error)
+    raw_data = records
+    source = "MongoDB Atlas"
+    st.success("Connected to MongoDB Atlas successfully.")
 
-    elif documents:
-        raw_data = documents
-        source = "MongoDB Atlas"
-
-        st.success("Successfully loaded sales records from MongoDB Atlas.")
-
-    else:
-        raw_data = SAMPLE_DATA
-
-        st.info(
-            f"Connected to MongoDB, but the collection "
-            f"'{DATABASE_NAME}.{COLLECTION_NAME}' is empty. "
-            "Showing sample data instead."
-        )
+else:
+    st.error(
+        "MONGODB_URI was not found. Add it under "
+        "Streamlit App settings → Secrets."
+    )
+    st.stop()
 
 try:
     df = prepare_data(raw_data)
-
-except (ValueError, TypeError) as exc:
-    st.error(f"Could not prepare sales data: {exc}")
+except (ValueError, TypeError) as error:
+    st.error(f"Could not prepare sales data: {error}")
     st.stop()
 
 if df.empty:
-    st.error("No valid sales records are available.")
+    st.error("No valid sales records were found.")
     st.stop()
 
-st.caption(f"Data source: {source} | Records loaded: {len(df)}")
-
+st.caption(
+    f"Data source: {source} | Total records loaded: {len(df)}"
+)
 
 # --------------------------------------------------
-# 7. SIDEBAR FILTERS
+# 8. SIDEBAR FILTERS
 # --------------------------------------------------
 st.sidebar.header("🔎 Sales Filters")
 
-all_categories = sorted(df["Category"].unique().tolist())
+categories = sorted(df["Category"].unique().tolist())
 
 selected_categories = st.sidebar.multiselect(
     "Select categories",
-    options=all_categories,
-    default=all_categories,
+    options=categories,
+    default=categories,
 )
 
 available_products = sorted(
@@ -264,35 +267,26 @@ filtered_df = df[
     & (df["Date"].dt.date <= end_date)
 ].copy()
 
-
 # --------------------------------------------------
-# 8. KEY PERFORMANCE INDICATORS
+# 9. KEY PERFORMANCE INDICATORS
 # --------------------------------------------------
 st.subheader("📌 Sales Overview")
 
+if filtered_df.empty:
+    st.warning("No records match your selected filters.")
+    st.stop()
+
 total_revenue = filtered_df["Revenue"].sum()
 units_sold = filtered_df["Quantity"].sum()
-sales_records = len(filtered_df)
-
-average_revenue = (
-    total_revenue / sales_records if sales_records else 0
-)
+record_count = len(filtered_df)
+average_revenue = total_revenue / record_count if record_count else 0
 
 col1, col2, col3, col4 = st.columns(4)
 
 col1.metric("Total Revenue", f"${total_revenue:,.2f}")
 col2.metric("Units Sold", f"{units_sold:,.0f}")
-col3.metric("Sales Records", f"{sales_records:,}")
+col3.metric("Sales Records", f"{record_count:,}")
 col4.metric("Average Revenue per Record", f"${average_revenue:,.2f}")
-
-
-# --------------------------------------------------
-# 9. HANDLE EMPTY FILTER RESULTS
-# --------------------------------------------------
-if filtered_df.empty:
-    st.warning("No sales records match the selected filters.")
-    st.stop()
-
 
 # --------------------------------------------------
 # 10. REVENUE TREND
@@ -312,17 +306,12 @@ fig_trend = px.line(
     x="Date",
     y="Revenue",
     markers=True,
-    title="Revenue Trend",
-    labels={
-        "Revenue": "Revenue ($)",
-        "Date": "Date",
-    },
+    title="Daily Revenue Trend",
+    labels={"Revenue": "Revenue ($)", "Date": "Date"},
 )
 
 fig_trend.update_layout(hovermode="x unified")
-
-st.plotly_chart(fig_trend, width="stretch")
-
+st.plotly_chart(fig_trend, use_container_width=True)
 
 # --------------------------------------------------
 # 11. REVENUE BY PRODUCT AND CATEGORY
@@ -347,7 +336,7 @@ with left_col:
         labels={"Revenue": "Revenue ($)"},
     )
 
-    st.plotly_chart(fig_product, width="stretch")
+    st.plotly_chart(fig_product, use_container_width=True)
 
 with right_col:
     st.subheader("🍩 Revenue by Category")
@@ -365,8 +354,7 @@ with right_col:
         title="Category Revenue Distribution",
     )
 
-    st.plotly_chart(fig_category, width="stretch")
-
+    st.plotly_chart(fig_category, use_container_width=True)
 
 # --------------------------------------------------
 # 12. UNITS SOLD BY CATEGORY
@@ -388,8 +376,7 @@ fig_quantity = px.bar(
     labels={"Quantity": "Units Sold"},
 )
 
-st.plotly_chart(fig_quantity, width="stretch")
-
+st.plotly_chart(fig_quantity, use_container_width=True)
 
 # --------------------------------------------------
 # 13. SALES RECORDS TABLE
@@ -401,13 +388,12 @@ display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
 
 st.dataframe(
     display_df.sort_values("Date", ascending=False),
-    width="stretch",
+    use_container_width=True,
     hide_index=True,
 )
 
-
 # --------------------------------------------------
-# 14. DOWNLOAD FILTERED DATA
+# 14. DOWNLOAD FILTERED SALES DATA
 # --------------------------------------------------
 csv_data = display_df.to_csv(index=False).encode("utf-8")
 
@@ -418,7 +404,6 @@ st.download_button(
     mime="text/csv",
 )
 
-
 # --------------------------------------------------
 # 15. FOOTER
 # --------------------------------------------------
@@ -428,5 +413,3 @@ st.caption(
     "Big Data Sales Analysis and Visualization System | "
     "Python · Streamlit · Pandas · Plotly · MongoDB Atlas"
 )
-
-
