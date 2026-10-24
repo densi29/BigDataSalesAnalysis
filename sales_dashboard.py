@@ -7,72 +7,56 @@ import streamlit as st
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
-# --------------------------------------------------
+# ==================================================
 # 1. PAGE CONFIGURATION
-# --------------------------------------------------
+# ==================================================
 st.set_page_config(
     page_title="Big Data Sales Analysis",
     page_icon="📊",
     layout="wide",
 )
 
-# --------------------------------------------------
-# 2. LOAD MONGODB SETTINGS
-# --------------------------------------------------
+# ==================================================
+# 2. LOAD CONFIGURATION
+# ==================================================
 load_dotenv()
 
-try:
-    MONGODB_URI = st.secrets["MONGODB_URI"]
-except (KeyError, FileNotFoundError):
-    MONGODB_URI = os.getenv("MONGODB_URI")
 
-DATABASE_NAME = os.getenv("MONGODB_DATABASE", "sales_db")
-COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "sales")
+def get_setting(name, default=None):
+    """Read a setting from Streamlit Secrets or local .env."""
+    try:
+        value = st.secrets.get(name)
+        if value:
+            return value
+    except (FileNotFoundError, AttributeError):
+        pass
 
-# Allow database and collection to be configured in Streamlit Secrets.
-try:
-    DATABASE_NAME = st.secrets.get("MONGODB_DATABASE", DATABASE_NAME)
-    COLLECTION_NAME = st.secrets.get("MONGODB_COLLECTION", COLLECTION_NAME)
-except (FileNotFoundError, AttributeError):
-    pass
+    return os.getenv(name, default)
 
-# --------------------------------------------------
-# 3. SAMPLE DATA (USED IF DATABASE IS UNAVAILABLE)
-# --------------------------------------------------
-SAMPLE_DATA = [
-    {"Date": "2026-01-05", "Product": "Laptop", "Category": "Electronics", "Quantity": 2, "UnitPrice": 75000},
-    {"Date": "2026-01-12", "Product": "Mouse", "Category": "Accessories", "Quantity": 5, "UnitPrice": 800},
-    {"Date": "2026-01-20", "Product": "Keyboard", "Category": "Accessories", "Quantity": 3, "UnitPrice": 1500},
-    {"Date": "2026-02-03", "Product": "Phone", "Category": "Electronics", "Quantity": 2, "UnitPrice": 45000},
-    {"Date": "2026-02-10", "Product": "Monitor", "Category": "Electronics", "Quantity": 2, "UnitPrice": 12000},
-    {"Date": "2026-02-18", "Product": "Headphones", "Category": "Accessories", "Quantity": 4, "UnitPrice": 2500},
-    {"Date": "2026-03-02", "Product": "Tablet", "Category": "Electronics", "Quantity": 1, "UnitPrice": 30000},
-    {"Date": "2026-03-09", "Product": "Webcam", "Category": "Accessories", "Quantity": 3, "UnitPrice": 2200},
-    {"Date": "2026-03-17", "Product": "Laptop", "Category": "Electronics", "Quantity": 1, "UnitPrice": 75000},
-    {"Date": "2026-04-04", "Product": "Phone", "Category": "Electronics", "Quantity": 1, "UnitPrice": 45000},
-    {"Date": "2026-04-11", "Product": "Mouse", "Category": "Accessories", "Quantity": 6, "UnitPrice": 800},
-    {"Date": "2026-04-20", "Product": "Monitor", "Category": "Electronics", "Quantity": 1, "UnitPrice": 12000},
-]
 
-# --------------------------------------------------
-# 4. CONNECT TO MONGODB ATLAS
-# --------------------------------------------------
-@st.cache_data(ttl=30)
+MONGODB_URI = get_setting("MONGODB_URI")
+DATABASE_NAME = get_setting("MONGODB_DATABASE", "sales_db")
+COLLECTION_NAME = get_setting("MONGODB_COLLECTION", "sales")
+
+# ==================================================
+# 3. MONGODB CONNECTION
+# ==================================================
+@st.cache_data(ttl=30, show_spinner=False)
 def load_sales(uri, database_name, collection_name):
     client = None
 
     try:
         client = MongoClient(
             uri,
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
+            serverSelectionTimeoutMS=15000,
+            connectTimeoutMS=15000,
         )
 
-        # Verify the database connection.
         client.admin.command("ping")
 
-        collection = client[database_name][collection_name]
-        records = list(collection.find({}, {"_id": 0}))
+        records = list(
+            client[database_name][collection_name].find({}, {"_id": 0})
+        )
 
         return records, None
 
@@ -84,16 +68,16 @@ def load_sales(uri, database_name, collection_name):
             client.close()
 
 
-# --------------------------------------------------
-# 5. CLEAN AND PREPARE DATA
-# --------------------------------------------------
+# ==================================================
+# 4. CLEAN AND PREPARE DATA
+# ==================================================
 def prepare_data(records):
     df = pd.DataFrame(records)
 
     if df.empty:
         return df
 
-    # Support common variations in column names.
+    # Normalize common column name variations.
     aliases = {
         "date": "Date",
         "salesdate": "Date",
@@ -106,140 +90,166 @@ def prepare_data(records):
         "unitprice": "UnitPrice",
         "unit_price": "UnitPrice",
         "price": "UnitPrice",
+        "revenue": "Revenue",
+        "totalrevenue": "Revenue",
+        "sales": "Revenue",
     }
 
-    rename_columns = {}
+    rename_map = {}
 
     for column in df.columns:
         normalized = (
-            str(column).strip().replace(" ", "").lower()
+            str(column).strip().lower().replace(" ", "").replace("-", "")
         )
         if normalized in aliases:
-            rename_columns[column] = aliases[normalized]
+            rename_map[column] = aliases[normalized]
 
-    df = df.rename(columns=rename_columns)
+    df = df.rename(columns=rename_map)
 
-    required = [
-        "Date",
-        "Product",
-        "Category",
-        "Quantity",
-        "UnitPrice",
-    ]
-
+    required = ["Date", "Product", "Category", "Quantity", "UnitPrice"]
     missing = [column for column in required if column not in df.columns]
 
     if missing:
         raise ValueError(
-            "Required columns missing from MongoDB: "
-            + ", ".join(missing)
+            "Missing required MongoDB columns: " + ", ".join(missing)
         )
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["UnitPrice"] = pd.to_numeric(df["UnitPrice"], errors="coerce")
 
-    df = df.dropna(subset=required).copy()
+    df["Product"] = df["Product"].astype("string").str.strip()
+    df["Category"] = df["Category"].astype("string").str.strip()
 
-    df["Product"] = df["Product"].astype(str)
-    df["Category"] = df["Category"].astype(str)
+    df = df.dropna(
+        subset=["Date", "Product", "Category", "Quantity", "UnitPrice"]
+    ).copy()
 
-    # Calculate revenue for each record.
+    df = df[
+        (df["Product"] != "")
+        & (df["Category"] != "")
+    ].copy()
+
+    # Calculate revenue from quantity and unit price.
     df["Revenue"] = df["Quantity"] * df["UnitPrice"]
 
     return df
 
 
-# --------------------------------------------------
-# 6. DASHBOARD HEADER
-# --------------------------------------------------
+# ==================================================
+# 5. DASHBOARD HEADER
+# ==================================================
 st.title("📊 Big Data Sales Analysis and Visualization System")
 
-st.markdown(
-    """
-    Explore sales performance, revenue trends, product performance,
-    and category contributions using interactive visualizations.
-    """
+st.write(
+    "Explore sales performance, revenue trends, product performance, "
+    "and category contributions using interactive visualizations."
 )
 
-# --------------------------------------------------
-# 7. LOAD DATABASE RECORDS
-# --------------------------------------------------
-if MONGODB_URI:
+# ==================================================
+# 6. CONNECT AND LOAD DATA
+# ==================================================
+if not MONGODB_URI:
+    st.error(
+        "MongoDB URI was not found. Add MONGODB_URI in "
+        "Streamlit App settings → Secrets."
+    )
+    st.stop()
+
+with st.spinner("Connecting to MongoDB Atlas and loading sales data..."):
     records, connection_error = load_sales(
         MONGODB_URI,
         DATABASE_NAME,
         COLLECTION_NAME,
     )
 
-    if connection_error:
-        st.error("Could not connect to MongoDB Atlas.")
-        st.caption(
-            "Check your Streamlit Secrets, database credentials, "
-            "Atlas network access, and database user permissions."
-        )
-        with st.expander("Technical error details"):
-            st.code(connection_error)
-        st.stop()
+if connection_error:
+    st.error("Could not connect to MongoDB Atlas.")
+    st.caption(
+        "Check your connection settings, database user permissions, "
+        "Atlas network access, and TLS configuration."
+    )
 
-    if not records:
-        st.warning(
-            f"MongoDB is connected, but "
-            f"{DATABASE_NAME}.{COLLECTION_NAME} contains no records."
-        )
-        st.stop()
+    with st.expander("Technical error details"):
+        st.code(connection_error)
 
-    raw_data = records
-    source = "MongoDB Atlas"
-    st.success("Connected to MongoDB Atlas successfully.")
+    st.stop()
 
-else:
-    st.error(
-        "MONGODB_URI was not found. Add it under "
-        "Streamlit App settings → Secrets."
+if not records:
+    st.warning(
+        f"No sales records found in {DATABASE_NAME}.{COLLECTION_NAME}."
     )
     st.stop()
 
 try:
-    df = prepare_data(raw_data)
+    df = prepare_data(records)
 except (ValueError, TypeError) as error:
     st.error(f"Could not prepare sales data: {error}")
     st.stop()
 
 if df.empty:
-    st.error("No valid sales records were found.")
+    st.warning("No valid sales records are available to display.")
     st.stop()
 
+st.success("Connected to MongoDB Atlas successfully.")
 st.caption(
-    f"Data source: {source} | Total records loaded: {len(df)}"
+    f"Database: {DATABASE_NAME} | Collection: {COLLECTION_NAME} "
+    f"| Records loaded: {len(df)}"
 )
 
-# --------------------------------------------------
-# 8. SIDEBAR FILTERS
-# --------------------------------------------------
-st.sidebar.header("🔎 Sales Filters")
+# ==================================================
+# 7. SIDEBAR FILTERS
+# ==================================================
+st.sidebar.title("🔎 Sales Filters")
+st.sidebar.caption("Choose one or more options to update the dashboard.")
 
-categories = sorted(df["Category"].unique().tolist())
+# Category filter.
+all_categories = sorted(df["Category"].unique().tolist())
 
 selected_categories = st.sidebar.multiselect(
     "Select categories",
-    options=categories,
-    default=categories,
+    options=all_categories,
+    default=all_categories,
+    key="category_filter",
+    placeholder="Choose categories...",
 )
 
+# Use selected categories to determine available products.
+if selected_categories:
+    category_df = df[
+        df["Category"].isin(selected_categories)
+    ].copy()
+else:
+    category_df = df.iloc[0:0].copy()
+
 available_products = sorted(
-    df.loc[
-        df["Category"].isin(selected_categories),
-        "Product",
-    ].unique().tolist()
+    category_df["Product"].unique().tolist()
 )
+
+# Remove previously selected products that no longer belong
+# to the selected categories.
+previous_products = st.session_state.get("product_filter", [])
+valid_previous_products = [
+    product
+    for product in previous_products
+    if product in available_products
+]
+
+# When categories change, include all currently available products.
+if (
+    set(valid_previous_products) != set(previous_products)
+    or "product_filter" not in st.session_state
+):
+    st.session_state["product_filter"] = available_products
 
 selected_products = st.sidebar.multiselect(
     "Select products",
     options=available_products,
-    default=available_products,
+    key="product_filter",
+    placeholder="Choose products...",
 )
 
+# Date filter.
 min_date = df["Date"].min().date()
 max_date = df["Date"].max().date()
 
@@ -248,18 +258,27 @@ date_range = st.sidebar.date_input(
     value=(min_date, max_date),
     min_value=min_date,
     max_value=max_date,
+    key="sales_date_range",
 )
 
-if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+if len(date_range) == 2:
     start_date, end_date = date_range
 else:
-    start_date = date_range[0] if isinstance(date_range, (tuple, list)) else date_range
-    end_date = start_date
+    start_date = date_range[0]
+    end_date = date_range[0]
 
-if start_date > end_date:
-    st.sidebar.error("Start date cannot be after end date.")
-    st.stop()
+# Reset filters button.
+if st.sidebar.button("Reset all filters", key="reset_filters"):
+    st.session_state["category_filter"] = all_categories
+    st.session_state["product_filter"] = sorted(
+        category_df["Product"].unique().tolist()
+    )
+    st.session_state["sales_date_range"] = (min_date, max_date)
+    st.rerun()
 
+# ==================================================
+# 8. APPLY FILTERS
+# ==================================================
 filtered_df = df[
     df["Category"].isin(selected_categories)
     & df["Product"].isin(selected_products)
@@ -267,19 +286,29 @@ filtered_df = df[
     & (df["Date"].dt.date <= end_date)
 ].copy()
 
-# --------------------------------------------------
-# 9. KEY PERFORMANCE INDICATORS
-# --------------------------------------------------
-st.subheader("📌 Sales Overview")
+st.sidebar.divider()
+st.sidebar.caption(
+    f"Showing {len(filtered_df)} of {len(df)} records"
+)
 
 if filtered_df.empty:
-    st.warning("No records match your selected filters.")
+    st.warning(
+        "No sales records match your selected filters. "
+        "Choose another category, product, or date range."
+    )
     st.stop()
+
+# ==================================================
+# 9. KEY PERFORMANCE INDICATORS
+# ==================================================
+st.subheader("📌 Sales Overview")
 
 total_revenue = filtered_df["Revenue"].sum()
 units_sold = filtered_df["Quantity"].sum()
 record_count = len(filtered_df)
-average_revenue = total_revenue / record_count if record_count else 0
+average_revenue = (
+    total_revenue / record_count if record_count else 0
+)
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -288,34 +317,37 @@ col2.metric("Units Sold", f"{units_sold:,.0f}")
 col3.metric("Sales Records", f"{record_count:,}")
 col4.metric("Average Revenue per Record", f"${average_revenue:,.2f}")
 
-# --------------------------------------------------
+# ==================================================
 # 10. REVENUE TREND
-# --------------------------------------------------
+# ==================================================
 st.subheader("📈 Revenue Over Time")
 
 daily_revenue = (
-    filtered_df.groupby(filtered_df["Date"].dt.date)["Revenue"]
+    filtered_df.assign(
+        SalesDate=filtered_df["Date"].dt.date
+    )
+    .groupby("SalesDate", as_index=False)["Revenue"]
     .sum()
-    .reset_index()
 )
-
-daily_revenue.columns = ["Date", "Revenue"]
 
 fig_trend = px.line(
     daily_revenue,
-    x="Date",
+    x="SalesDate",
     y="Revenue",
     markers=True,
     title="Daily Revenue Trend",
-    labels={"Revenue": "Revenue ($)", "Date": "Date"},
+    labels={
+        "SalesDate": "Date",
+        "Revenue": "Revenue ($)",
+    },
 )
 
 fig_trend.update_layout(hovermode="x unified")
 st.plotly_chart(fig_trend, use_container_width=True)
 
-# --------------------------------------------------
-# 11. REVENUE BY PRODUCT AND CATEGORY
-# --------------------------------------------------
+# ==================================================
+# 11. PRODUCT AND CATEGORY ANALYSIS
+# ==================================================
 left_col, right_col = st.columns(2)
 
 with left_col:
@@ -356,9 +388,9 @@ with right_col:
 
     st.plotly_chart(fig_category, use_container_width=True)
 
-# --------------------------------------------------
+# ==================================================
 # 12. UNITS SOLD BY CATEGORY
-# --------------------------------------------------
+# ==================================================
 st.subheader("📦 Units Sold by Category")
 
 category_quantity = (
@@ -378,9 +410,9 @@ fig_quantity = px.bar(
 
 st.plotly_chart(fig_quantity, use_container_width=True)
 
-# --------------------------------------------------
-# 13. SALES RECORDS TABLE
-# --------------------------------------------------
+# ==================================================
+# 13. SALES DATA TABLE
+# ==================================================
 st.subheader("📋 Sales Records")
 
 display_df = filtered_df.copy()
@@ -392,9 +424,9 @@ st.dataframe(
     hide_index=True,
 )
 
-# --------------------------------------------------
-# 14. DOWNLOAD FILTERED SALES DATA
-# --------------------------------------------------
+# ==================================================
+# 14. DOWNLOAD FILTERED DATA
+# ==================================================
 csv_data = display_df.to_csv(index=False).encode("utf-8")
 
 st.download_button(
@@ -404,12 +436,12 @@ st.download_button(
     mime="text/csv",
 )
 
-# --------------------------------------------------
+# ==================================================
 # 15. FOOTER
-# --------------------------------------------------
+# ==================================================
 st.divider()
 
 st.caption(
     "Big Data Sales Analysis and Visualization System | "
-    "Python · Streamlit · Pandas · Plotly · MongoDB Atlas"
+    "Python • Streamlit • Pandas • Plotly • MongoDB Atlas"
 )
